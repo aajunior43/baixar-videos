@@ -1,0 +1,13 @@
+.gradio-container {
+    max-width: 1400px !important;
+}
+.main-header {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+.advanced-options {
+    background: #f8f9fa;
+    padding: 1rem;
+    border-radius: 8px;
+    margin: 1rem 0;
+}
