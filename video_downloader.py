@@ -6,9 +6,54 @@ from pathlib import Path
 import threading
 import time
 import subprocess
-import json
 import random
 import webbrowser
+import shutil
+
+QUALITY_CHOICES = [
+    "Melhor qualidade",
+    "4K ou menor",
+    "1080p ou menor",
+    "720p ou menor",
+    "Pior qualidade",
+    "Apenas áudio (MP3)",
+    "Apenas áudio (M4A)",
+]
+
+URL_PATTERN = re.compile(
+    r'^https?://'
+    r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'
+    r'localhost|'
+    r'\d{1,3}(?:\.\d{1,3}){3})'
+    r'(?::\d+)?'
+    r'(?:/?|[/?]\S+)$', re.IGNORECASE
+)
+
+
+def is_valid_url(url: str) -> bool:
+    """Valida se a string é uma URL HTTP/HTTPS válida."""
+    url = url.strip()
+    return bool(url) and bool(URL_PATTERN.match(url))
+
+
+def resolve_file_path(file_input) -> str | None:
+    """Normaliza o caminho retornado pelo componente File do Gradio."""
+    if not file_input:
+        return None
+    if isinstance(file_input, str):
+        return file_input if os.path.exists(file_input) else None
+    if isinstance(file_input, list) and file_input:
+        return resolve_file_path(file_input[0])
+    if hasattr(file_input, 'name'):
+        path = file_input.name
+        return path if path and os.path.exists(path) else None
+    return None
+
+
+def check_ffmpeg() -> bool:
+    """Verifica se o FFmpeg está disponível no sistema."""
+    return shutil.which('ffmpeg') is not None
+
 
 class VideoDownloader:
     def __init__(self) -> None:
@@ -56,7 +101,15 @@ class VideoDownloader:
                 progress(0, desc=f"{description_prefix}Erro no download.")
         return _progress_hook
 
-    def get_advanced_ydl_opts(self, quality: str = "best", cookies_file: str = None, user_agent: str = None, output_path: str = None) -> dict:
+    def get_advanced_ydl_opts(
+        self,
+        quality: str = "best",
+        cookies_file: str = None,
+        user_agent: str = None,
+        output_path: str = None,
+        format_id: str = None,
+        noplaylist: bool = False,
+    ) -> dict:
         """Configura as opções avançadas do yt-dlp com base na qualidade e outros parâmetros.
 
         Args:
@@ -64,36 +117,44 @@ class VideoDownloader:
             cookies_file (str, optional): Caminho para o arquivo de cookies. Defaults to None.
             user_agent (str, optional): User agent a ser usado. Defaults to None.
             output_path (str, optional): Caminho para o diretório de saída. Defaults to None.
+            format_id (str, optional): ID de formato específico do yt-dlp. Defaults to None.
+            noplaylist (bool, optional): Baixa apenas o vídeo, ignorando playlists. Defaults to False.
 
         Returns:
             dict: Dicionário de opções para o yt-dlp.
         """
         current_download_path = output_path if output_path else self.download_path
-        Path(current_download_path).mkdir(exist_ok=True) # Garante que o diretório de destino exista
+        Path(current_download_path).mkdir(parents=True, exist_ok=True)
 
+        resolved_ua = user_agent or self.get_random_user_agent()
         ydl_opts: dict = {
             'outtmpl': os.path.join(current_download_path, '%(title)s.%(ext)s'),
             'ignoreerrors': True,
             'no_warnings': False,
             'extract_flat': False,
-            'user_agent': user_agent or self.get_random_user_agent(),
+            'user_agent': resolved_ua,
+            'retries': 3,
+            'fragment_retries': 3,
+            'merge_output_format': 'mp4',
             'http_headers': {
-                'User-Agent': user_agent or self.get_random_user_agent(),
+                'User-Agent': resolved_ua,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
-                'Accept-Encoding': 'gzip,deflate',
-                'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
-                'Keep-Alive': '115',
+                'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate',
                 'Connection': 'keep-alive',
             }
         }
-        
-        # Adicionar cookies se especificado
-        if cookies_file and os.path.exists(cookies_file):
-            ydl_opts['cookiefile'] = cookies_file
-        
-        # Configurar qualidade
-        if quality == "Melhor qualidade":
+
+        if noplaylist:
+            ydl_opts['noplaylist'] = True
+
+        cookies_path = resolve_file_path(cookies_file) if cookies_file else None
+        if cookies_path:
+            ydl_opts['cookiefile'] = cookies_path
+
+        if format_id:
+            ydl_opts['format'] = format_id
+        elif quality == "Melhor qualidade":
             ydl_opts['format'] = 'bestvideo+bestaudio/best'
         elif quality == "Pior qualidade":
             ydl_opts['format'] = 'worst'
@@ -148,7 +209,9 @@ class VideoDownloader:
                     'thumbnail': info.get('thumbnail', ''),
                     'uploader': info.get('uploader', 'Desconhecido'),
                     'view_count': info.get('view_count', 0),
-                    'description': info.get('description', '')[:500] + '...' if info.get('description') else '',
+                    'description': (
+                        (desc[:500] + '...') if len(desc) > 500 else desc
+                    ) if (desc := info.get('description', '')) else '',
                     'upload_date': info.get('upload_date', ''),
                     'tags': info.get('tags', [])[:10] if info.get('tags') else []
                 }
@@ -170,11 +233,13 @@ class VideoDownloader:
             dict: Dicionário com o status do download (sucesso/erro) e informações do vídeo.
         """
         try:
-            ydl_opts = self.get_advanced_ydl_opts(quality, cookies_file, user_agent, output_path)
-            
+            ydl_opts = self.get_advanced_ydl_opts(
+                quality, cookies_file, user_agent, output_path, noplaylist=True
+            )
+
             if progress_callback:
                 ydl_opts['progress_hooks'] = [progress_callback]
-            
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 if not info:
@@ -186,10 +251,48 @@ class VideoDownloader:
                     'duration': info.get('duration', 0),
                     'filesize': info.get('filesize', 0)
                 }
-                
+
         except Exception as e:
             return {'success': False, 'error': str(e)}
-    
+
+    def download_video_by_format_id(
+        self,
+        url: str,
+        format_id: str,
+        progress_callback=None,
+        cookies_file: str = None,
+        user_agent: str = None,
+        output_path: str = None,
+    ) -> dict:
+        """Baixa um vídeo usando um ID de formato específico do yt-dlp."""
+        try:
+            ydl_opts = self.get_advanced_ydl_opts(
+                cookies_file=cookies_file,
+                user_agent=user_agent,
+                output_path=output_path,
+                format_id=format_id,
+                noplaylist=True,
+            )
+
+            if progress_callback:
+                ydl_opts['progress_hooks'] = [progress_callback]
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if not info:
+                    return {'success': False, 'error': 'Não foi possível extrair informações do vídeo.'}
+                return {
+                    'success': True,
+                    'title': info.get('title', 'Vídeo baixado'),
+                    'filename': info.get('_filename', 'arquivo_desconhecido'),
+                    'duration': info.get('duration', 0),
+                    'filesize': info.get('filesize', 0),
+                    'format_id': format_id,
+                }
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
     def download_playlist(self, url: str, quality: str, progress_callback=None, cookies_file: str = None, user_agent: str = None, output_path: str = None) -> dict:
         """Baixa uma playlist inteira com a qualidade especificada.
 
@@ -396,25 +499,23 @@ downloader = VideoDownloader()
 def download_video_ui(url: str, quality: str, cookies_file: str = None, user_agent: str = None, output_path: str = None, progress=gr.Progress()) -> str:
     """
     Interface para download de vídeo individual.
-    Args:
-        url (str): URL do vídeo a ser baixado.
-        quality (str): Qualidade desejada para o download.
-        cookies_file (str, optional): Caminho para o arquivo de cookies. Defaults to None.
-        user_agent (str, optional): User agent personalizado. Defaults to None.
-        output_path (str, optional): Caminho para o diretório de saída. Defaults to None.
-        progress (gr.Progress, optional): Objeto de progresso do Gradio. Defaults to gr.Progress().
-    Returns:
-        str: Mensagem de status do download.
     """
     if not url.strip():
         return "❌ Por favor, insira uma URL válida."
-    
+    if not is_valid_url(url):
+        return "❌ URL inválida. Use um link começando com http:// ou https://"
+
+    if quality in ("Apenas áudio (MP3)", "Apenas áudio (M4A)") and not check_ffmpeg():
+        return "❌ FFmpeg não encontrado. Instale o FFmpeg para extrair áudio."
+
     progress(0, desc="Iniciando download...")
-    
-    # Usar o novo método para criar o progress hook
+
     progress_hook = downloader._create_progress_hook(progress)
-    
-    result = downloader.download_video(url, quality, progress_hook, cookies_file, user_agent, output_path)
+
+    result = downloader.download_video(
+        url, quality, progress_hook,
+        resolve_file_path(cookies_file), user_agent, output_path
+    )
     
     if result['success']:
         filename = os.path.basename(result['filename'])
@@ -425,27 +526,20 @@ def download_video_ui(url: str, quality: str, cookies_file: str = None, user_age
         return f"❌ **Erro no download:** {result['error']}"
 
 def download_playlist_ui(url: str, quality: str, cookies_file: str = None, user_agent: str = None, output_path: str = None, progress=gr.Progress()) -> str:
-    """
-    Interface para download de playlist.
-    Args:
-        url (str): URL da playlist a ser baixada.
-        quality (str): Qualidade desejada para o download.
-        cookies_file (str, optional): Caminho para o arquivo de cookies. Defaults to None.
-        user_agent (str, optional): User agent personalizado. Defaults to None.
-        output_path (str, optional): Caminho para o diretório de saída. Defaults to None.
-        progress (gr.Progress, optional): Objeto de progresso do Gradio. Defaults to gr.Progress().
-    Returns:
-        str: Mensagem de status do download da playlist.
-    """
+    """Interface para download de playlist."""
     if not url.strip():
         return "❌ Por favor, insira uma URL válida."
-    
+    if not is_valid_url(url):
+        return "❌ URL inválida. Use um link começando com http:// ou https://"
+
     progress(0, desc="Iniciando download da playlist...")
-    
-    # Usar o novo método para criar o progress hook
+
     progress_hook = downloader._create_progress_hook(progress, description_prefix="Baixando playlist...")
-    
-    result = downloader.download_playlist(url, quality, progress_hook, cookies_file, user_agent, output_path)
+
+    result = downloader.download_playlist(
+        url, quality, progress_hook,
+        resolve_file_path(cookies_file), user_agent, output_path
+    )
     
     if result['success']:
         final_download_path = output_path if output_path else downloader.download_path
@@ -454,40 +548,36 @@ def download_playlist_ui(url: str, quality: str, cookies_file: str = None, user_
         return f"❌ **Erro no download da playlist:** {result['error']}"
 
 def batch_download_ui(urls: str, quality: str, cookies_file: str = None, user_agent: str = None, output_path: str = None, progress=gr.Progress()) -> str:
-    """
-    Interface para download em lote de vídeos.
-    Args:
-        urls (str): URLs dos vídeos, uma por linha.
-        quality (str): Qualidade desejada para o download.
-        cookies_file (str, optional): Caminho para o arquivo de cookies. Defaults to None.
-        user_agent (str, optional): User agent personalizado. Defaults to None.
-        output_path (str, optional): Caminho para o diretório de saída. Defaults to None.
-        progress (gr.Progress, optional): Objeto de progresso do Gradio. Defaults to gr.Progress().
-    Returns:
-        str: Mensagem de status do download em lote.
-    """
+    """Interface para download em lote de vídeos."""
     if not urls.strip():
         return "❌ Por favor, insira URLs válidas."
-    
+
     urls_list = [url.strip() for url in urls.split('\n') if url.strip()]
     if not urls_list:
         return "❌ Nenhuma URL válida encontrada."
-    
+
+    invalid_urls = [url for url in urls_list if not is_valid_url(url)]
+    if invalid_urls:
+        return f"❌ {len(invalid_urls)} URL(s) inválida(s). Exemplo: {invalid_urls[0]}"
+
+    if quality in ("Apenas áudio (MP3)", "Apenas áudio (M4A)") and not check_ffmpeg():
+        return "❌ FFmpeg não encontrado. Instale o FFmpeg para extrair áudio."
+
+    cookies_path = resolve_file_path(cookies_file)
     total_videos = len(urls_list)
     results = []
-    
+
     for i, url in enumerate(urls_list):
         progress(i / total_videos, desc=f"Iniciando download do vídeo {i+1}/{total_videos}: {url[:50]}...")
-        
-        # Criar um progress hook para cada vídeo, com o progresso geral do lote
+
         video_progress_hook = downloader._create_progress_hook(
             progress,
             total_items=total_videos,
             current_item_index=i,
             description_prefix=f"Vídeo {i+1}/{total_videos}: "
         )
-        
-        result = downloader.download_video(url, quality, video_progress_hook, cookies_file, user_agent, output_path)
+
+        result = downloader.download_video(url, quality, video_progress_hook, cookies_path, user_agent, output_path)
         results.append({
             'url': url,
             'success': result['success'],
@@ -510,19 +600,13 @@ def batch_download_ui(urls: str, quality: str, cookies_file: str = None, user_ag
     return result_text
 
 def get_formats_ui(url: str, cookies_file: str = None) -> str:
-    """Interface para listar formatos disponíveis de um vídeo.
-
-    Args:
-        url (str): URL do vídeo.
-        cookies_file (str, optional): Caminho para o arquivo de cookies. Defaults to None.
-
-    Returns:
-        str: String formatada com os formatos disponíveis ou uma mensagem de erro.
-    """
+    """Interface para listar formatos disponíveis de um vídeo."""
     if not url.strip():
-        return "Por favor, insira uma URL válida."
-    
-    formats: list[str] = downloader.get_available_formats(url, cookies_file)
+        return "❌ Por favor, insira uma URL válida."
+    if not is_valid_url(url):
+        return "❌ URL inválida. Use um link começando com http:// ou https://"
+
+    formats: list[str] = downloader.get_available_formats(url, resolve_file_path(cookies_file))
     
     if not formats:
         return "Nenhum formato disponível encontrado."
@@ -552,24 +636,27 @@ def get_supported_sites_ui() -> str:
         'Redes Sociais': ['youtube', 'facebook', 'instagram', 'tiktok', 'twitter', 'reddit'],
         'Plataformas de Vídeo': ['vimeo', 'dailymotion', 'twitch', 'bilibili', 'niconico'],
         'Streaming': ['netflix', 'disney', 'hulu', 'amazon', 'crunchyroll'],
-        'Outros': []
     }
-    
+    all_keywords = [kw for keywords in categories.values() for kw in keywords]
+
     sites_text: str = "🌐 **Sites Suportados pelo yt-dlp:**\n\n"
     sites_text += f"📊 **Total de sites:** {len(sites)}\n\n"
-    
+
     for category, keywords in categories.items():
-        category_sites: list[str] = [site for site in sites if any(keyword in site.lower() for keyword in keywords)]
+        category_sites: list[str] = [
+            site for site in sites if any(keyword in site.lower() for keyword in keywords)
+        ]
         if category_sites:
             sites_text += f"**{category}:**\n"
-            for site in sorted(category_sites)[:10]:  # Limita a 10 por categoria
+            for site in sorted(category_sites)[:10]:
                 sites_text += f"• {site}\n"
             if len(category_sites) > 10:
                 sites_text += f"  ... e mais {len(category_sites) - 10}\n"
             sites_text += "\n"
-    
-    # Mostrar alguns sites aleatórios da categoria "Outros"
-    other_sites: list[str] = [site for site in sites if not any(keyword in site.lower() for keywords in categories.values() for keyword in keywords)]
+
+    other_sites: list[str] = [
+        site for site in sites if not any(keyword in site.lower() for keyword in all_keywords)
+    ]
     if other_sites:
         sites_text += f"**Outros sites ({len(other_sites)}):**\n"
         for site in sorted(other_sites)[:20]:  # Limita a 20
@@ -580,9 +667,17 @@ def get_supported_sites_ui() -> str:
     return sites_text
 
 def auto_update_ytdlp() -> None:
-    """Tenta atualizar o yt-dlp automaticamente usando pip."""
+    """Atualiza o yt-dlp se a variável de ambiente YTDLP_AUTO_UPDATE estiver ativa."""
+    if os.environ.get('YTDLP_AUTO_UPDATE', '').lower() not in ('1', 'true', 'yes'):
+        return
     try:
-        subprocess.run(["python", "-m", "pip", "install", "--upgrade", "yt-dlp"], check=True)
+        subprocess.run(
+            ["python", "-m", "pip", "install", "--upgrade", "yt-dlp"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        print("✅ yt-dlp atualizado com sucesso!")
     except Exception as e:
         print(f"[Aviso] Não foi possível atualizar yt-dlp automaticamente: {e}")
 
@@ -603,6 +698,25 @@ auto_update_ytdlp()
 browser_thread = threading.Thread(target=open_browser, daemon=True)
 browser_thread.start()
 
+def update_ytdlp_ui() -> str:
+    """Interface para atualizar o yt-dlp manualmente."""
+    try:
+        result = subprocess.run(
+            ["python", "-m", "pip", "install", "--upgrade", "yt-dlp"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        version_line = next(
+            (line for line in result.stdout.splitlines() if 'yt-dlp' in line.lower()),
+            "yt-dlp atualizado"
+        )
+        return f"✅ **Atualização concluída!**\n\n{version_line}"
+    except subprocess.CalledProcessError as e:
+        return f"❌ **Erro ao atualizar:** {e.stderr or str(e)}"
+    except Exception as e:
+        return f"❌ **Erro ao atualizar:** {str(e)}"
+
 def get_qualities_ui(url: str, cookies_file: str = None) -> str:
     """Interface para mostrar qualidades disponíveis organizadas para download.
 
@@ -614,9 +728,11 @@ def get_qualities_ui(url: str, cookies_file: str = None) -> str:
         str: String formatada com as qualidades disponíveis ou uma mensagem de erro.
     """
     if not url.strip():
-        return "Por favor, insira uma URL válida."
-    
-    result: dict = downloader.get_available_qualities(url, cookies_file)
+        return "❌ Por favor, insira uma URL válida."
+    if not is_valid_url(url):
+        return "❌ URL inválida. Use um link começando com http:// ou https://"
+
+    result: dict = downloader.get_available_qualities(url, resolve_file_path(cookies_file))
     
     if 'error' in result:
         return f"❌ {result['error']}"
@@ -649,7 +765,7 @@ def get_qualities_ui(url: str, cookies_file: str = None) -> str:
                         fps_info: str = f" ({fmt.get('fps', 'N/A')}fps)" if fmt.get('fps') != 'N/A' else ""
                         format_note: str = f" - {fmt.get('format_note', '')}" if fmt.get('format_note') else ""
                         
-                        qualities_text += f"  • {fmt.get('ext', 'N/A').upper()} - {filesize}{fps_info}{format_note}\n"
+                        qualities_text += f"  • ID `{fmt.get('format_id', 'N/A')}` — {fmt.get('ext', 'N/A').upper()} - {filesize}{fps_info}{format_note}\n"
     else:
         qualities_text += "\n❌ Erro ao processar qualidades disponíveis."
     
@@ -667,8 +783,10 @@ def get_video_info_ui(url: str, cookies_file: str = None) -> str:
     """
     if not url.strip():
         return "❌ Por favor, insira uma URL válida."
+    if not is_valid_url(url):
+        return "❌ URL inválida. Use um link começando com http:// ou https://"
 
-    info = downloader.get_video_info(url, cookies_file)
+    info = downloader.get_video_info(url, resolve_file_path(cookies_file))
 
     if 'error' in info:
         return f"❌ Erro ao obter informações: {info['error']}"
@@ -700,32 +818,24 @@ def get_video_info_ui(url: str, cookies_file: str = None) -> str:
     return output, gr.update(value=thumbnail, visible=bool(thumbnail))
 
 def download_specific_quality_ui(url: str, quality_choice: str, cookies_file: str = None, user_agent: str = None, output_path: str = None, progress=gr.Progress()) -> str:
-
-    """
-    Interface para download de vídeo com qualidade específica.
-    Args:
-        url (str): URL do vídeo a ser baixado.
-        quality_choice (str): ID da qualidade específica a ser baixada (ex: '137').
-        cookies_file (str, optional): Caminho para o arquivo de cookies. Defaults to None.
-        user_agent (str, optional): User agent personalizado. Defaults to None.
-        output_path (str, optional): Caminho para o diretório de saída. Defaults to None.
-        progress (gr.Progress, optional): Objeto de progresso do Gradio. Defaults to gr.Progress().
-    Returns:
-        str: Mensagem de status do download.
-    """
+    """Interface para download de vídeo com qualidade específica (ID de formato)."""
     if not url.strip():
         return "❌ Por favor, insira uma URL válida."
-    
-    if not quality_choice or quality_choice == "Selecione uma qualidade":
-        return "❌ Por favor, selecione uma qualidade."
-    
+    if not is_valid_url(url):
+        return "❌ URL inválida. Use um link começando com http:// ou https://"
+
+    format_id = quality_choice.strip()
+    if not format_id:
+        return "❌ Por favor, informe o ID da qualidade (ex: 137, 136, 135)."
+
     progress(0, desc="Iniciando download...")
-    
-    # Usar o novo método para criar o progress hook
+
     progress_hook = downloader._create_progress_hook(progress)
-    
-    # Chamar a função de download principal com a qualidade específica
-    result = downloader.download_video(url, quality_choice, progress_hook, cookies_file, user_agent, output_path)
+
+    result = downloader.download_video_by_format_id(
+        url, format_id, progress_hook,
+        resolve_file_path(cookies_file), user_agent, output_path
+    )
     
     if result['success']:
         filename = os.path.basename(result['filename'])
@@ -738,13 +848,15 @@ def download_specific_quality_ui(url: str, quality_choice: str, cookies_file: st
 # Interface Gradio
 with gr.Blocks(
     title="🎬 Baixador de Vídeos Universal - Versão Avançada",
-    css="file=style.css"
 ) as demo:
     
-    gr.HTML("""
+    gr.HTML(f"""
     <div class="main-header">
-        <h1>🎬 Baixador de Vídeos Universal - Versão Avançada</h1>
-        <p>Baixe vídeos de qualquer site com funcionalidades avançadas!</p>
+        <h1>🎬 Baixador de Vídeos Universal</h1>
+        <p>Baixe vídeos de centenas de sites com interface moderna e intuitiva</p>
+    </div>
+    <div class="status-banner {'status-ok' if check_ffmpeg() else 'status-warn'}">
+        {'✅ FFmpeg detectado — conversão de áudio disponível' if check_ffmpeg() else '⚠️ FFmpeg não encontrado — instale para extrair áudio (MP3/M4A)'}
     </div>
     """)
 
@@ -770,6 +882,11 @@ with gr.Blocks(
                 value=downloader.download_path,
                 elem_id="global_output_path_input"
             )
+        with gr.Row():
+            update_btn = gr.Button("🔄 Atualizar yt-dlp", variant="secondary")
+            update_output = gr.Markdown()
+
+        update_btn.click(fn=update_ytdlp_ui, inputs=[], outputs=[update_output])
     
     with gr.Tabs():
         # Aba de Informações do Vídeo
@@ -804,15 +921,7 @@ with gr.Blocks(
                     lines=1
                 )
                 quality_select = gr.Dropdown(
-                    choices=[
-                        "Melhor qualidade",
-                        "4K ou menor",
-                        "1080p ou menor",
-                        "720p ou menor",
-                        "Pior qualidade",
-                        "Apenas áudio (MP3)",
-                        "Apenas áudio (M4A)"
-                    ],
+                    choices=QUALITY_CHOICES,
                     value="Melhor qualidade",
                     label="🎯 Qualidade"
                 )
@@ -842,15 +951,7 @@ with gr.Blocks(
             
             with gr.Row():
                 batch_quality = gr.Dropdown(
-                    choices=[
-                        "Melhor qualidade",
-                        "4K ou menor",
-                        "1080p ou menor",
-                        "720p ou menor",
-                        "Pior qualidade",
-                        "Apenas áudio (MP3)",
-                        "Apenas áudio (M4A)"
-                    ],
+                    choices=QUALITY_CHOICES,
                     value="Melhor qualidade",
                     label="🎯 Qualidade"
                 )
@@ -878,15 +979,7 @@ with gr.Blocks(
                     lines=1
                 )
                 playlist_quality = gr.Dropdown(
-                    choices=[
-                        "Melhor qualidade",
-                        "4K ou menor",
-                        "1080p ou menor",
-                        "720p ou menor",
-                        "Pior qualidade",
-                        "Apenas áudio (MP3)",
-                        "Apenas áudio (M4A)"
-                    ],
+                    choices=QUALITY_CHOICES,
                     value="Melhor qualidade",
                     label="🎯 Qualidade"
                 )
@@ -985,15 +1078,21 @@ with gr.Blocks(
     
 
 if __name__ == "__main__":
-    print("🚀 Iniciando Baixador de Vídeos Universal - Versão Avançada")
+    print("🚀 Iniciando Baixador de Vídeos Universal")
     print("📡 Servidor iniciando em: http://localhost:7860")
+    if check_ffmpeg():
+        print("✅ FFmpeg detectado")
+    else:
+        print("⚠️  FFmpeg não encontrado — instale para conversão de áudio")
     print("🌐 O navegador será aberto automaticamente em alguns segundos...")
     print("⏹️  Pressione Ctrl+C para parar o servidor")
+    print("💡 Para atualizar yt-dlp na inicialização: YTDLP_AUTO_UPDATE=1 python video_downloader.py")
     print("-" * 60)
     
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
-        show_error=True
+        show_error=True,
+        css="file=style.css",
     ) 
