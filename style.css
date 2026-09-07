@@ -1,13 +1,65 @@
 .gradio-container {
-    max-width: 1400px !important;
+    max-width: 1200px !important;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif !important;
 }
+
 .main-header {
     text-align: center;
-    margin-bottom: 2rem;
+    margin-bottom: 1.5rem;
+    padding: 2rem 1.5rem;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-radius: 16px;
+    color: white;
+    box-shadow: 0 8px 32px rgba(102, 126, 234, 0.3);
 }
+
+.main-header h1 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.8rem;
+    font-weight: 700;
+}
+
+.main-header p {
+    margin: 0;
+    opacity: 0.9;
+    font-size: 1rem;
+}
+
+.status-banner {
+    padding: 0.75rem 1.25rem;
+    border-radius: 10px;
+    margin-bottom: 1.5rem;
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+
+.status-ok {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+.status-warn {
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeeba;
+}
+
+.global-settings {
+    background: #f8f9fc;
+    padding: 1.25rem;
+    border-radius: 12px;
+    margin-bottom: 1.5rem;
+    border: 1px solid #e8ecf4;
+}
+
 .advanced-options {
     background: #f8f9fa;
     padding: 1rem;
     border-radius: 8px;
     margin: 1rem 0;
+}
+
+button.primary {
+    border-radius: 8px !important;
 }

@@ -1,13 +1,3 @@
 gradio>=4.0.0
-yt-dlp>=2023.12.0
+yt-dlp[brotli,certifi,mutagen,pycryptodome,secretstorage,websockets,webvtt]>=2023.12.0
 requests>=2.25.0
-urllib3>=1.26.0
-yt-dlp[webvtt]>=2023.12.0
-yt-dlp[websockets]>=2023.12.0
-yt-dlp[brotli]>=2023.12.0
-yt-dlp[pycryptodome]>=2023.12.0
-yt-dlp[secretstorage]>=2023.12.0
-yt-dlp[certifi]>=2023.12.0
-yt-dlp[websockets]>=2023.12.0
-yt-dlp[mutagen]>=2023.12.0
-yt-dlp[atomicparsley]>=2023.12.0 
